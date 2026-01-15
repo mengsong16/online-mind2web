@@ -1,9 +1,0 @@
-{
-  "trajectory_success": 0,
-  "trajectory_side_effect": 0,
-  "trajectory_optimality": 0,
-  "trajectory_looping": 0,
-  "trajectory_optimality_approx": 0,
-  "trajectory_optimality_diff": 0,
-  "trajectory_optimality_merge": 0
-}
