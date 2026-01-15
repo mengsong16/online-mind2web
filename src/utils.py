@@ -114,12 +114,31 @@ class OpenaiEngine():
     )
     def generate(self, messages, max_new_tokens=512, temperature=0, model=None, **kwargs):
         model = model if model else self.model
-        response = self.client.chat.completions.create(
-            model=model if model else self.model,
-            messages=messages,
-            max_tokens=max_new_tokens,
-            temperature=temperature,
-            **kwargs,
-        )
+
+        # OpenAI reasoning models (e.g., o4-mini / o3-*) do NOT accept `max_tokens`.
+        # They require `max_completion_tokens` instead.
+        m = (model or "").lower()
+        is_reasoning_model = m.startswith("o")  # covers o4-mini, o3-*, o1-*, etc.
+
+        req_kwargs = dict(kwargs)
+        if is_reasoning_model:
+            # Avoid passing unsupported/ignored sampling params for reasoning models.
+            req_kwargs.pop("max_tokens", None)
+            req_kwargs.pop("temperature", None) # temperature=1
+            req_kwargs["max_completion_tokens"] = max_new_tokens
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                **req_kwargs,
+            )
+        else:
+            req_kwargs.pop("max_completion_tokens", None)
+            req_kwargs["max_tokens"] = max_new_tokens
+            req_kwargs["temperature"] = temperature
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                **req_kwargs,
+            )
         return [choice.message.content for choice in response.choices]
     

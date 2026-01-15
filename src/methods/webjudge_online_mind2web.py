@@ -29,7 +29,7 @@ async def identify_key_points(task, model):
                 ],
             }
         ]
-    responses = await asyncio.to_thread(model.generate, messages)
+    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=2048)
     return responses[0]
 
 async def judge_image(task, image_path, key_points, model):
@@ -82,7 +82,7 @@ The snapshot of the web page is shown in the image."""
             }
         ]
 
-    responses = await asyncio.to_thread(model.generate, messages)
+    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=2048)
     return responses[0]
 
 async def WebJudge_Online_Mind2Web_eval(task, last_actions, images_path, model, score_threshold):
