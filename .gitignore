@@ -1,2 +1,11 @@
+# data
 /data/
 /images/
+
+# Python bytecode
+*.pyc
+**/*.pyc
+*.pyo
+*.pyd
+__pycache__/
+**/__pycache__/

@@ -86,7 +86,9 @@ def auto_eval(args, task_subset, final_predicted_labels, lock, model):
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
 
-        response = model.generate(messages)[0]
+        response = model.generate(messages)[0] # default max_completion_tokens=512 
+        #response = model.generate(messages, max_new_tokens=4096)[0]
+        
         predicted_label = extract_predication(response, args.mode)
         
         #Store evaluation details
