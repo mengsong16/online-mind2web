@@ -169,7 +169,12 @@ The potentially important snapshots of the webpage in the agent's trajectory and
             score = re.findall(pattern, score_text)[0]
             record.append({"Response": response, "Score": int(score)})
         except Exception as e:
-            print(f"Error processing response: {e}")
+            #print(f"Error processing response: {e}")
+            print(f"[PARSE ERROR] {e}", flush=True)
+            print(f"[RAW LEN] {0 if response is None else len(response)}", flush=True)
+            print(f"[RAW HEAD]\n{(response or '')[:400]}", flush=True)
+            print(f"[RAW TAIL]\n{(response or '')[-400:]}", flush=True)
+
             score = 0
             record.append({"Response": response, "Score": 0})
 

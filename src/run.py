@@ -11,6 +11,7 @@ import copy
 import asyncio
 import multiprocessing
 
+
 def auto_eval(args, task_subset, final_predicted_labels, lock, model):
 
     ################## get the already done task id ###############
@@ -86,9 +87,18 @@ def auto_eval(args, task_subset, final_predicted_labels, lock, model):
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
 
-        response = model.generate(messages)[0] # default max_completion_tokens=512 
-        #response = model.generate(messages, max_new_tokens=4096)[0]
-        
+        #response = model.generate(messages)[0] # default max_completion_tokens=512 
+        response = model.generate(messages, max_new_tokens=4096)[0]
+
+        # =============== record debug info ===================
+        lower = (response or "").lower()
+        has_status = "status:" in lower
+        output_results["debug_has_status"] = has_status
+        output_results["debug_response_len"] = 0 if response is None else len(response)
+        # output_results["debug_response_head"] = (response or "")[:300]
+        # output_results["debug_response_tail"] = (response or "")[-300:]
+        # ==========================================
+                
         predicted_label = extract_predication(response, args.mode)
         
         #Store evaluation details
@@ -108,6 +118,29 @@ def auto_eval(args, task_subset, final_predicted_labels, lock, model):
         with lock:
             with open(os.path.join(args.output_path, f"{args.mode}_{args.model}_score_threshold_{args.score_threshold}_auto_eval_results.json"), "a+") as f_out:
                 f_out.write(json.dumps(output_results) + "\n")
+        
+        # --- DEBUG PRINTS (for parallel_eval) ---
+        task_id = output_results.get("task_id", output_results.get("id", "UNKNOWN_TASK"))
+        
+        print("\n" + "=" * 90, flush=True)
+        print(f"[EVAL DEBUG] task_id={task_id} mode={args.mode}", flush=True)
+        print("-" * 90, flush=True)
+
+        print("debug_has_status:", output_results.get("debug_has_status"), flush=True)
+        print("debug_response_len:", output_results.get("debug_response_len"), flush=True)
+
+        # head = output_results.get("debug_response_head") or ""
+        # tail = output_results.get("debug_response_tail") or ""
+
+        # print("debug_response_head:\n" + head, flush=True)
+        # print("-" * 90, flush=True)
+        # print("debug_response_tail:\n" + tail, flush=True)
+
+        print("-" * 90, flush=True)
+        print("predicted_label:", output_results.get("predicted_label"), flush=True)
+        print("=" * 90 + "\n", flush=True)
+        # --- END DEBUG PRINTS ---
+        
 
 
 def process_subset(task_subset, args, final_predicted_labels, lock, model):
