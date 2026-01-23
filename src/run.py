@@ -95,8 +95,8 @@ def auto_eval(args, task_subset, final_predicted_labels, lock, model):
         has_status = "status:" in lower
         output_results["debug_has_status"] = has_status
         output_results["debug_response_len"] = 0 if response is None else len(response)
-        # output_results["debug_response_head"] = (response or "")[:300]
-        # output_results["debug_response_tail"] = (response or "")[-300:]
+        output_results["debug_response_head"] = (response or "")[:300]
+        output_results["debug_response_tail"] = (response or "")[-300:]
         # ==========================================
                 
         predicted_label = extract_predication(response, args.mode)

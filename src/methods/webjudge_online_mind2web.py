@@ -29,7 +29,7 @@ async def identify_key_points(task, model):
                 ],
             }
         ]
-    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=2048)
+    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=4096)
     #responses = await asyncio.to_thread(model.generate, messages)
     return responses[0]
 
@@ -83,7 +83,7 @@ The snapshot of the web page is shown in the image."""
             }
         ]
 
-    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=2048)
+    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=4096)
     #responses = await asyncio.to_thread(model.generate, messages)
     return responses[0]
 
