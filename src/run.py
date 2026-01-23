@@ -6,10 +6,31 @@ from methods.webjudge_general_eval import *
 from methods.webjudge_online_mind2web import *
 from methods.webvoyager_eval import *
 from utils import OpenaiEngine, extract_predication
+from eval_config import JUDGE_MAX_TOKENS
 import json
 import copy
 import asyncio
 import multiprocessing
+import time
+from datetime import timedelta
+
+
+def _bump_empty_response(kind: str, meta: str = "") -> None:
+    """Best-effort cross-process counter via an append-only log file.
+
+    The file path is provided via env var EVAL_EMPTY_COUNTER_FILE.
+    Appends are used so multiprocessing processes can write without
+    sharing Python state.
+    """
+    path = os.environ.get("EVAL_EMPTY_COUNTER_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{kind}\t{meta}\n")
+    except Exception:
+        # Never crash evaluation due to debug instrumentation.
+        return
 
 
 def auto_eval(args, task_subset, final_predicted_labels, lock, model):
@@ -88,8 +109,11 @@ def auto_eval(args, task_subset, final_predicted_labels, lock, model):
             raise ValueError(f"Unknown mode: {args.mode}")
 
         #response = model.generate(messages)[0] # default max_completion_tokens=512 
-        response = model.generate(messages, max_new_tokens=4096)[0]
+        response = model.generate(messages, max_new_tokens=JUDGE_MAX_TOKENS)[0]
 
+        if response is None or len(response) == 0:
+            print(f"[JUDGE MODEL RESPONSE RAW LEN] {0 if response is None else len(response)} task_id={task_id}", flush=True)
+            _bump_empty_response("JUDGE", f"task_id={task_id}")
         # =============== record debug info ===================
         lower = (response or "").lower()
         has_status = "status:" in lower
@@ -149,6 +173,20 @@ def process_subset(task_subset, args, final_predicted_labels, lock, model):
 
 def parallel_eval(args, num_workers=60):
 
+    # Set up a cross-process counter file for empty responses.
+    os.makedirs(args.output_path, exist_ok=True)
+    counter_file = os.path.join(args.output_path, "_empty_response_counts.log")
+    try:
+        with open(counter_file, "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        counter_file = ""
+    if counter_file:
+        os.environ["EVAL_EMPTY_COUNTER_FILE"] = counter_file
+
+    eval_start = time.time()
+    print("[EVAL TIMER] Evaluation started.", flush=True)
+
     #Evaluate in parallel based on num of works
     task_dirs = [
         d for d in sorted(os.listdir(args.trajectories_dir)) 
@@ -180,6 +218,30 @@ def parallel_eval(args, num_workers=60):
 
     print("Evaluation complete.")
     print(f"The success rate is {(success_num / len(task_dirs)) * 100}.")
+
+    # Summarize empty-response counts (best-effort).
+    key_empty = score_empty = judge_empty = 0
+    if counter_file and os.path.exists(counter_file):
+        try:
+            with open(counter_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    kind = line.split("\t", 1)[0].strip().upper()
+                    if kind == "KEY_POINT":
+                        key_empty += 1
+                    elif kind == "SCORE":
+                        score_empty += 1
+                    elif kind == "JUDGE":
+                        judge_empty += 1
+        except Exception:
+            pass
+    print(
+        f"[EMPTY RESPONSE COUNTS] key_point={key_empty} score={score_empty} judge={judge_empty}",
+        flush=True,
+    )
+
+    eval_end = time.time()
+    elapsed = timedelta(seconds=int(round(eval_end - eval_start)))
+    print(f"[EVAL TIMER] Total evaluation time: {elapsed}", flush=True)
 
 
 if __name__ == "__main__":

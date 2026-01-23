@@ -1,8 +1,41 @@
 from utils import encode_image
 from PIL import Image
+import os
 import re
 import asyncio
+from eval_config import KEY_POINT_MAX_TOKENS, SCORE_MAX_TOKENS
 MAX_IMAGE =50
+
+
+def _bump_empty_response(kind: str, meta: str = "") -> None:
+    """Best-effort cross-process counter via an append-only log file."""
+    path = os.environ.get("EVAL_EMPTY_COUNTER_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{kind}\t{meta}\n")
+    except Exception:
+        return
+
+
+
+def _infer_task_id_from_image_path(image_path: str) -> str:
+    """Best-effort task_id inference from an image file path."""
+    try:
+        from pathlib import Path
+        import os
+        p = Path(image_path)
+        if p.parent.name in {"trajectory", "trajectory_images", "traj", "screenshots", "images"}:
+            return p.parent.parent.name
+        parts = list(p.parts)
+        if "trajectory" in parts:
+            idx = parts.index("trajectory")
+            if idx > 0:
+                return parts[idx - 1]
+        return p.parents[1].name if len(p.parents) >= 2 else p.parent.name
+    except Exception:
+        return "unknown"
 
 async def identify_key_points(task, input_image_paths, model):
     system_msg = """You are an expert tasked with analyzing a given task to identify the key points explicitly stated in the task description.
@@ -43,7 +76,12 @@ async def identify_key_points(task, input_image_paths, model):
                 ]+ input_images_msg,
             }
         ]
-    responses = await asyncio.to_thread(model.generate, messages)
+    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=KEY_POINT_MAX_TOKENS)
+    resp0 = responses[0] if responses else None
+    if resp0 is None or len(resp0) == 0:
+        _tid = _infer_task_id_from_image_path(input_image_paths[0]) if input_image_paths else "unknown"
+        print(f"[KEY POINT MODEL RESPONSE RAW LEN] {0 if resp0 is None else len(resp0)} task_id={_tid}", flush=True)
+        _bump_empty_response("KEY_POINT", f"task_id={_tid}")
     return responses[0]
 
 async def judge_image(task, input_image_paths, image_path, key_points, model):
@@ -113,7 +151,13 @@ The snapshot of the web page is shown in the image."""
             }
         )
 
-    responses = await asyncio.to_thread(model.generate, messages)
+    responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=SCORE_MAX_TOKENS)
+    resp0 = responses[0] if responses else None
+    if resp0 is None or len(resp0) == 0:
+        _tid = _infer_task_id_from_image_path(image_path)
+        _img = os.path.basename(image_path) if isinstance(image_path, str) else str(image_path)
+        print(f"[SCORE MODEL RESPONSE RAW LEN] {0 if resp0 is None else len(resp0)} task_id={_tid} image={_img}", flush=True)
+        _bump_empty_response("SCORE", f"task_id={_tid} image={_img}")
     return responses[0]
 
 
