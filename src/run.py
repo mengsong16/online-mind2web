@@ -5,32 +5,12 @@ from methods.automomous_eval import *
 from methods.webjudge_general_eval import *
 from methods.webjudge_online_mind2web import *
 from methods.webvoyager_eval import *
-from utils import OpenaiEngine, extract_predication
-from eval_config import JUDGE_MAX_TOKENS
+from utils import OpenaiEngine, extract_predication, reset_eval_stats, read_eval_stats, log_eval_stat, set_eval_stats_path, set_eval_stats_shared, append_eval_log_lines
 import json
 import copy
 import asyncio
 import multiprocessing
-import time
-from datetime import timedelta
-
-
-def _bump_empty_response(kind: str, meta: str = "") -> None:
-    """Best-effort cross-process counter via an append-only log file.
-
-    The file path is provided via env var EVAL_EMPTY_COUNTER_FILE.
-    Appends are used so multiprocessing processes can write without
-    sharing Python state.
-    """
-    path = os.environ.get("EVAL_EMPTY_COUNTER_FILE")
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{kind}\t{meta}\n")
-    except Exception:
-        # Never crash evaluation due to debug instrumentation.
-        return
+from eval_config import JUDGE_MAX_TOKENS
 
 
 def auto_eval(args, task_subset, final_predicted_labels, lock, model):
@@ -111,13 +91,17 @@ def auto_eval(args, task_subset, final_predicted_labels, lock, model):
         #response = model.generate(messages)[0] # default max_completion_tokens=512 
         response = model.generate(messages, max_new_tokens=JUDGE_MAX_TOKENS)[0]
 
-        if response is None or len(response) == 0:
-            print(f"[JUDGE MODEL RESPONSE RAW LEN] {0 if response is None else len(response)} task_id={task_id}", flush=True)
-            _bump_empty_response("JUDGE", f"task_id={task_id}")
-        # =============== record debug info ===================
+        
+        if response is None or len(str(response)) == 0:
+            log_eval_stat("empty_judge", 1)
+            print(f"[JUDGE MODEL RESPONSE RAW LEN] {0 if response is None else len(str(response))} task_id={task_id}", flush=True)
+# =============== record debug info ===================
         lower = (response or "").lower()
         has_status = "status:" in lower
         output_results["debug_has_status"] = has_status
+        # record has_status stats (cross-process)
+        log_eval_stat("has_status_missing", 1 if not has_status else 0)
+        log_eval_stat("has_status_present", 1 if has_status else 0)
         output_results["debug_response_len"] = 0 if response is None else len(response)
         output_results["debug_response_head"] = (response or "")[:300]
         output_results["debug_response_tail"] = (response or "")[-300:]
@@ -167,31 +151,27 @@ def auto_eval(args, task_subset, final_predicted_labels, lock, model):
         
 
 
-def process_subset(task_subset, args, final_predicted_labels, lock, model):
+def process_subset(task_subset, args, final_predicted_labels, lock, model, eval_stats):
+
+    # Ensure child processes (including spawn) write stats to the same log path.
+    set_eval_stats_path(os.path.join(args.output_path, 'open2mind_eval_stats.log'))
+
+    set_eval_stats_shared(eval_stats, lock)
 
     auto_eval(args, task_subset, final_predicted_labels, lock, model)
 
 def parallel_eval(args, num_workers=60):
-
-    # Set up a cross-process counter file for empty responses.
-    os.makedirs(args.output_path, exist_ok=True)
-    counter_file = os.path.join(args.output_path, "_empty_response_counts.log")
-    try:
-        with open(counter_file, "w", encoding="utf-8") as f:
-            f.write("")
-    except Exception:
-        counter_file = ""
-    if counter_file:
-        os.environ["EVAL_EMPTY_COUNTER_FILE"] = counter_file
-
-    eval_start = time.time()
-    print("[EVAL TIMER] Evaluation started.", flush=True)
 
     #Evaluate in parallel based on num of works
     task_dirs = [
         d for d in sorted(os.listdir(args.trajectories_dir)) 
         if os.path.isdir(os.path.join(args.trajectories_dir, d))
     ]
+    os.makedirs(args.output_path, exist_ok=True)
+    set_eval_stats_path(os.path.join(args.output_path, 'open2mind_eval_stats.log'))
+    reset_eval_stats()  # clear shared eval stats log
+    import time, datetime
+    _t0 = time.perf_counter()
     print(f"Evaluating {len(task_dirs)} tasks in total.")
     chunk_size = len(task_dirs) // num_workers
     task_subsets = [task_dirs[i:i + chunk_size] for i in range(0, len(task_dirs), chunk_size)]
@@ -205,9 +185,11 @@ def parallel_eval(args, num_workers=60):
     lock = multiprocessing.Lock()
     with multiprocessing.Manager() as manager:
         final_predicted_labels = manager.list()
+        eval_stats = manager.dict()
+        set_eval_stats_shared(eval_stats, lock)
         processes = []
         for subset in task_subsets:
-            p = multiprocessing.Process(target=process_subset, args=(subset, args, final_predicted_labels, lock, model))
+            p = multiprocessing.Process(target=process_subset, args=(subset, args, final_predicted_labels, lock, model, eval_stats))
             p.start()
             processes.append(p)
 
@@ -216,34 +198,26 @@ def parallel_eval(args, num_workers=60):
 
         success_num = sum(final_predicted_labels) 
 
-    print("Evaluation complete.")
-    print(f"The success rate is {(success_num / len(task_dirs)) * 100}.")
-
-    # Summarize empty-response counts (best-effort).
-    key_empty = score_empty = judge_empty = 0
-    if counter_file and os.path.exists(counter_file):
-        try:
-            with open(counter_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    kind = line.split("\t", 1)[0].strip().upper()
-                    if kind == "KEY_POINT":
-                        key_empty += 1
-                    elif kind == "SCORE":
-                        score_empty += 1
-                    elif kind == "JUDGE":
-                        judge_empty += 1
-        except Exception:
-            pass
-    print(
-        f"[EMPTY RESPONSE COUNTS] key_point={key_empty} score={score_empty} judge={judge_empty}",
-        flush=True,
-    )
-
-    eval_end = time.time()
-    elapsed = timedelta(seconds=int(round(eval_end - eval_start)))
-    print(f"[EVAL TIMER] Total evaluation time: {elapsed}", flush=True)
-
-
+        print("Evaluation complete.")
+        print(f"The success rate is {(success_num / len(task_dirs)) * 100}.")
+        stats = read_eval_stats()
+        print(f"[EMPTY RESPONSE COUNTS] key_point={stats.get('empty_key_point', 0)} score={stats.get('empty_score', 0)} judge={stats.get('empty_judge', 0)}", flush=True)
+        # Status presence stats (should be consistent with status_parse_error)
+        has_missing = stats.get("has_status_missing", 0)
+        has_present = stats.get("has_status_present", 0)
+        status_parse_err = stats.get("status_parse_error", 0)
+        print(f"[STATUS STATS] has_status_missing={has_missing} has_status_present={has_present} status_parse_error={status_parse_err}", flush=True)
+        print(f"[PARSE STATS] status_parse_error={stats.get('status_parse_error', 0)} score_parse_error={stats.get('score_parse_error', 0)} score_parse_ok={stats.get('score_parse_ok', 0)}", flush=True)
+        _elapsed = datetime.timedelta(seconds=(time.perf_counter() - _t0))
+        print(f"[EVAL TIMER] Total evaluation time: {_elapsed}", flush=True)
+        # Also write a concise summary into the shared eval log file (stored under auto_eval_directory).
+        append_eval_log_lines([
+            f"The success rate is {(success_num / len(task_dirs)) * 100}.",
+            f"[EMPTY RESPONSE COUNTS] key_point={stats.get('empty_key_point', 0)} score={stats.get('empty_score', 0)} judge={stats.get('empty_judge', 0)}",
+            f"[STATUS STATS] has_status_missing={has_missing} has_status_present={has_present} status_parse_error={status_parse_err}",
+            f"[PARSE STATS] status_parse_error={stats.get('status_parse_error', 0)} score_parse_error={stats.get('score_parse_error', 0)} score_parse_ok={stats.get('score_parse_ok', 0)}",
+            f"[EVAL TIMER] Total evaluation time: {_elapsed}",
+        ])
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Auto evaluation of web navigation tasks.")
     parser.add_argument('--mode', type=str, default='Online_Mind2Web_eval', help='the mode of evaluation')
@@ -256,4 +230,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     parallel_eval(args, args.num_worker)
-

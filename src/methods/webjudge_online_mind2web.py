@@ -1,46 +1,12 @@
-from utils import encode_image
+from utils import encode_image, log_eval_stat
 from PIL import Image
-import os
 import re
 import asyncio
-from eval_config import KEY_POINT_MAX_TOKENS, SCORE_MAX_TOKENS
+import os
 MAX_IMAGE =50
+from eval_config import KEY_POINT_MAX_TOKENS, SCORE_MAX_TOKENS
 
-
-def _bump_empty_response(kind: str, meta: str = "") -> None:
-    """Best-effort cross-process counter via an append-only log file."""
-    path = os.environ.get("EVAL_EMPTY_COUNTER_FILE")
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{kind}\t{meta}\n")
-    except Exception:
-        return
-
-
-def _infer_task_id_from_image_path(image_path: str) -> str:
-    """Best-effort task_id inference from an image file path."""
-    try:
-        from pathlib import Path
-        p = Path(image_path)
-        # Common layout: .../<task_id>/trajectory/*.png
-        if p.parent.name in {"trajectory", "trajectory_images", "traj", "screenshots", "images"}:
-            return p.parent.parent.name
-        parts = list(p.parts)
-        if "trajectory" in parts:
-            idx = parts.index("trajectory")
-            if idx > 0:
-                return parts[idx - 1]
-        # Fallback: use grandparent if possible
-        if len(p.parents) >= 2:
-            return p.parents[1].name
-        return p.parent.name
-    except Exception:
-        return "unknown"
-
-
-async def identify_key_points(task, model, task_id: str = "unknown"):
+async def identify_key_points(task, model, task_id=None):
     system_msg = """You are an expert tasked with analyzing a given task to identify the key points explicitly stated in the task description.
 
 **Objective**: Carefully analyze the task description and extract the critical elements explicitly mentioned in the task for achieving its goal.
@@ -66,11 +32,12 @@ async def identify_key_points(task, model, task_id: str = "unknown"):
             }
         ]
     responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=KEY_POINT_MAX_TOKENS)
+    
     resp0 = responses[0] if responses else None
     if resp0 is None or len(resp0) == 0:
+        log_eval_stat("empty_key_point", 1)
         print(f"[KEY POINT MODEL RESPONSE RAW LEN] {0 if resp0 is None else len(resp0)} task_id={task_id}", flush=True)
-        _bump_empty_response("KEY_POINT", f"task_id={task_id}")
-    #responses = await asyncio.to_thread(model.generate, messages)
+#responses = await asyncio.to_thread(model.generate, messages)
     return responses[0]
 
 async def judge_image(task, image_path, key_points, model):
@@ -124,13 +91,17 @@ The snapshot of the web page is shown in the image."""
         ]
 
     responses = await asyncio.to_thread(model.generate, messages, max_new_tokens=SCORE_MAX_TOKENS)
+    
     resp0 = responses[0] if responses else None
     if resp0 is None or len(resp0) == 0:
-        _tid = _infer_task_id_from_image_path(image_path)
-        _img = os.path.basename(image_path) if isinstance(image_path, str) else str(image_path)
-        print(f"[SCORE MODEL RESPONSE RAW LEN] {0 if resp0 is None else len(resp0)} task_id={_tid} image={_img}", flush=True)
-        _bump_empty_response("SCORE", f"task_id={_tid} image={_img}")
-    #responses = await asyncio.to_thread(model.generate, messages)
+        log_eval_stat("empty_score", 1)
+        _tid = None
+        try:
+            _tid = os.path.basename(os.path.dirname(os.path.dirname(image_path)))
+        except Exception:
+            _tid = None
+        print(f"[SCORE MODEL RESPONSE RAW LEN] {0 if resp0 is None else len(resp0)} task_id={_tid} image={os.path.basename(image_path)}", flush=True)
+#responses = await asyncio.to_thread(model.generate, messages)
     return responses[0]
 
 async def WebJudge_Online_Mind2Web_eval(task, last_actions, images_path, model, score_threshold):
@@ -159,6 +130,14 @@ Format your response into two lines as shown below:
 Thoughts: <your thoughts and reasoning process based on double-checking each key points and the evaluation criteria>
 Status: "success" or "failure"
 """
+    # Infer task_id from the first image path (expected: .../<task_id>/trajectory/<img>)
+    task_id = None
+    if images_path:
+        try:
+            task_id = os.path.basename(os.path.dirname(os.path.dirname(images_path[0])))
+        except Exception:
+            task_id = None
+
     prompt = """User Task: {task}
 
 Key Points: {key_points}
@@ -170,7 +149,6 @@ The potentially important snapshots of the webpage in the agent's trajectory and
 {thoughts}"""
 
 
-    task_id = _infer_task_id_from_image_path(images_path[0]) if images_path else "unknown"
     key_points = await identify_key_points(task, model, task_id=task_id)
     key_points = key_points.replace("\n\n", "\n")
 
@@ -188,14 +166,25 @@ The potentially important snapshots of the webpage in the agent's trajectory and
     whole_thoughts = []
     record = []
     pattern = r"[1-5]"
+    score_parse_ok = 0
+    # Infer task_id from the first image path (expected: .../<task_id>/trajectory/<img>)
+    task_id = None
+    if images_path:
+        try:
+            task_id = os.path.basename(os.path.dirname(os.path.dirname(images_path[0])))
+        except Exception:
+            task_id = None
     for response, image_path in zip(image_responses, images_path):
         try:
             score_text = response.split("Score")[1]
             thought = response.split("**Reasoning**:")[-1].strip().lstrip("\n").split("\n\n")[0].replace('\n',' ')
             score = re.findall(pattern, score_text)[0]
+            score_parse_ok += 1
+            log_eval_stat("score_parse_ok", 1)
             record.append({"Response": response, "Score": int(score)})
         except Exception as e:
             #print(f"Error processing response: {e}")
+            log_eval_stat("score_parse_error", 1)
             print(f"[PARSE ERROR] {e}", flush=True)
             print(f"[RAW LEN] {0 if response is None else len(response)}", flush=True)
             print(f"[RAW HEAD]\n{(response or '')[:400]}", flush=True)
@@ -235,4 +224,6 @@ Action History:
                 + whole_content_img
         }
     ]
+    # One log entry per task to keep the log small
+    log_eval_stat('score_parse_ok', score_parse_ok)
     return messages, text, system_msg, record, key_points

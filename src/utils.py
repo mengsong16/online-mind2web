@@ -9,6 +9,85 @@ from openai import (
 )
 import os
 import backoff
+import tempfile
+
+# ---- Evaluation debug stats (cross-process via append-only log file) ----
+_EVAL_STATS_PATH = os.path.join(tempfile.gettempdir(), 'open2mind_eval_stats.log')
+
+
+_EVAL_STATS_SHARED = None
+_EVAL_STATS_LOCK = None
+
+def set_eval_stats_shared(shared_dict, lock=None):
+    """Attach a multiprocessing.Manager().dict() for per-event stats (no disk writes)."""
+    global _EVAL_STATS_SHARED, _EVAL_STATS_LOCK
+    _EVAL_STATS_SHARED = shared_dict
+    _EVAL_STATS_LOCK = lock
+
+def set_eval_stats_path(path: str):
+    """Set the shared eval stats log path (call once in the main process before workers spawn)."""
+    global _EVAL_STATS_PATH
+    _EVAL_STATS_PATH = path
+    try:
+        os.makedirs(os.path.dirname(_EVAL_STATS_PATH), exist_ok=True)
+    except Exception:
+        pass
+
+def append_eval_log_lines(lines):
+    """Append raw log lines to the shared eval stats log (used for the final summary)."""
+    try:
+        with open(_EVAL_STATS_PATH, 'a', encoding='utf-8') as f:
+            for line in lines:
+                f.write(str(line) + "\n")
+    except Exception:
+        pass
+
+
+def reset_eval_stats():
+    """Clear shared eval stats (and remove summary log file)."""
+    # clear shared counters
+    try:
+        if _EVAL_STATS_SHARED is not None:
+            if _EVAL_STATS_LOCK is not None:
+                with _EVAL_STATS_LOCK:
+                    _EVAL_STATS_SHARED.clear()
+            else:
+                _EVAL_STATS_SHARED.clear()
+    except Exception:
+        pass
+
+    # clear summary log file
+    try:
+        if os.path.exists(_EVAL_STATS_PATH):
+            os.remove(_EVAL_STATS_PATH)
+    except Exception:
+        pass
+
+def log_eval_stat(kind: str, value: int = 1):
+    """Increment a stat counter in shared dict; do NOT write to disk."""
+    try:
+        if _EVAL_STATS_SHARED is None:
+            return
+        if _EVAL_STATS_LOCK is not None:
+            with _EVAL_STATS_LOCK:
+                _EVAL_STATS_SHARED[kind] = int(_EVAL_STATS_SHARED.get(kind, 0)) + int(value)
+        else:
+            _EVAL_STATS_SHARED[kind] = int(_EVAL_STATS_SHARED.get(kind, 0)) + int(value)
+    except Exception:
+        pass
+
+def read_eval_stats():
+    """Read aggregated stats from shared dict."""
+    try:
+        if _EVAL_STATS_SHARED is None:
+            return {}
+        if _EVAL_STATS_LOCK is not None:
+            with _EVAL_STATS_LOCK:
+                return dict(_EVAL_STATS_SHARED)
+        return dict(_EVAL_STATS_SHARED)
+    except Exception:
+        return {}
+
 
 def encode_image(image):
     """Convert a PIL image to base64 string."""
@@ -19,48 +98,30 @@ def encode_image(image):
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 def extract_predication(response, mode):
-    """Extract the prediction from the response."""
-    if mode == "Autonomous_eval":
-        try:
-            if "success" in response.lower().split('status:')[1]:
-                return 1
-            else:
-                return 0
-        except:
-            return 0
-    elif mode == "AgentTrek_eval":
-        try:
-            if "success" in response.lower().split('status:')[1]:
-                return 1
-            else:
-                return 0
-        except:
-            return 0
-    elif mode == "WebVoyager_eval":
-        if "FAILURE" in response:
-            return 0
-        else:
-            return 1
-    elif mode == "WebJudge_Online_Mind2Web_eval":
-        try:
-            if "success" in response.lower().split('status:')[1]:
-                return 1
-            else:
-                return 0
-        except:
-            return 0  
-    elif mode == "WebJudge_general_eval":
-        try:
-            if "success" in response.lower().split('status:')[1]:
-                return 1
-            else:
-                return 0
-        except:
-            return 0      
-    else:
-        raise ValueError(f"Unknown mode: {mode}")
+    """Extract the prediction from the response.
 
+    NOTE: We count cases where `Status:` cannot be parsed (missing or malformed).
+    """
+    if mode == "WebVoyager_eval":
+        # WebVoyager uses a different convention in this repo.
+        resp = "" if response is None else str(response)
+        return 0 if "FAILURE" in resp else 1
 
+    # Modes that rely on parsing `Status:`
+    if mode in {"Autonomous_eval", "AgentTrek_eval", "WebJudge_Online_Mind2Web_eval", "WebJudge_general_eval"}:
+        resp = "" if response is None else str(response)
+        low = resp.lower()
+        if "status:" not in low:
+            log_eval_stat("status_parse_error", 1)
+            return 0
+        try:
+            tail = low.split("status:", 1)[1]
+            return 1 if "success" in tail else 0
+        except Exception:
+            log_eval_stat("status_parse_error", 1)
+            return 0
+
+    raise ValueError(f"Unknown mode: {mode}")
 class OpenaiEngine():
     def __init__(
         self,
