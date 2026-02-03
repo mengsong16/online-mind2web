@@ -207,7 +207,7 @@ def parallel_eval(args, num_workers=60):
         has_present = stats.get("has_status_present", 0)
         status_parse_err = stats.get("status_parse_error", 0)
         print(f"[STATUS STATS] has_status_missing={has_missing} has_status_present={has_present} status_parse_error={status_parse_err}", flush=True)
-        print(f"[PARSE STATS] status_parse_error={stats.get('status_parse_error', 0)} score_parse_error={stats.get('score_parse_error', 0)} score_parse_ok={stats.get('score_parse_ok', 0)}", flush=True)
+        print(f"[SCORE STATS] score_parse_error={stats.get('score_parse_error', 0)} score_parse_ok={stats.get('score_parse_ok', 0)}", flush=True)
         _elapsed = datetime.timedelta(seconds=(time.perf_counter() - _t0))
         print(f"[EVAL TIMER] Total evaluation time: {_elapsed}", flush=True)
         # Also write a concise summary into the shared eval log file (stored under auto_eval_directory).
@@ -215,7 +215,7 @@ def parallel_eval(args, num_workers=60):
             f"The success rate is {(success_num / len(task_dirs)) * 100}.",
             f"[EMPTY RESPONSE COUNTS] key_point={stats.get('empty_key_point', 0)} score={stats.get('empty_score', 0)} judge={stats.get('empty_judge', 0)}",
             f"[STATUS STATS] has_status_missing={has_missing} has_status_present={has_present} status_parse_error={status_parse_err}",
-            f"[PARSE STATS] status_parse_error={stats.get('status_parse_error', 0)} score_parse_error={stats.get('score_parse_error', 0)} score_parse_ok={stats.get('score_parse_ok', 0)}",
+            f"[SCORE STATS] score_parse_error={stats.get('score_parse_error', 0)} score_parse_ok={stats.get('score_parse_ok', 0)}",
             f"[EVAL TIMER] Total evaluation time: {_elapsed}",
         ])
 if __name__ == "__main__":
